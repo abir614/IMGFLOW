@@ -1,12 +1,11 @@
-# fastapi pinned to 0.108.0 — required by iopaint (LaMa fill support)
-fastapi==0.108.0
-uvicorn[standard]>=0.30.0
-python-multipart>=0.0.9
-Pillow==9.5.0
-numpy>=1.24.0
-opencv-python-headless>=4.8.0
-scipy>=1.11.0
+fastapi
+uvicorn[standard]
+python-multipart
+Pillow
+numpy
+opencv-python-headless
+scipy
 packaging
-rembg[gpu]==2.0.59
-onnxruntime>=1.16.0
-iopaint==1.6.0
+rembg[gpu]
+onnxruntime
+iopaint
