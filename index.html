@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>IMGFLOW — Pro Pipeline</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=JetBrains+Mono:wght@300;400;500;600&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="noise"></div>
+<div class="grid-bg"></div>
+
+<div class="app">
+
+  <!-- ── Header ── -->
+  <header class="hdr">
+    <div class="hdr-left">
+      <div class="eyebrow"><span class="dot"></span>shopify image pipeline</div>
+      <h1>IMG<span class="accent">FLOW</span></h1>
+      <div class="tagline">upscale · compress · webp · isnet bg removal · smart resize · 100% local, zero api</div>
+    </div>
+    <div class="hdr-right">
+      <div class="vtag"><span class="vtag-dot"></span>GIT : ABIR614</div>
+      <div class="hdr-stat">
+        <span class="hs-num" id="statsCount">0</span>
+        <span class="hs-label">processed</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- ── Flow Tabs (now 3) ── -->
+  <div class="flow-tabs">
+    <button class="ftab f1 active" onclick="selectFlow(1)">
+      <div class="ftab-top"><span class="ftab-num">01</span><span class="ftab-badge">standard</span></div>
+      <div class="ftab-name">Standard Pipeline</div>
+      <div class="ftab-chain">
+        <span class="chip">Upscale</span><span class="arr">→</span>
+        <span class="chip">Compress</span><span class="arr">→</span>
+        <span class="chip">WebP</span>
+      </div>
+    </button>
+    <button class="ftab f2" onclick="selectFlow(2)">
+      <div class="ftab-top"><span class="ftab-num">02</span><span class="ftab-badge f2-badge">isnet ai</span></div>
+      <div class="ftab-name">No Background</div>
+      <div class="ftab-chain">
+        <span class="chip">ISNet AI Remove</span><span class="arr">→</span>
+        <span class="chip">Refine Edges</span><span class="arr">→</span>
+        <span class="chip">Upscale</span><span class="arr">→</span>
+        <span class="chip">WebP / PNG</span>
+      </div>
+    </button>
+    <button class="ftab f3" onclick="selectFlow(3)">
+      <div class="ftab-top"><span class="ftab-num">03</span><span class="ftab-badge f3-badge">smart resize</span></div>
+      <div class="ftab-name">Smart Resize</div>
+      <div class="ftab-chain">
+        <span class="chip">Auto Detect</span><span class="arr">→</span>
+        <span class="chip">Crop / Extend / Fit</span><span class="arr">→</span>
+        <span class="chip">WebP</span>
+      </div>
+    </button>
+  </div>
+
+  <!-- ── Pipeline Track ── -->
+  <div class="pipe-track" id="pipeTrack"></div>
+
+  <!-- ── Drop Zone ── -->
+  <div class="drop-zone" id="dropZone">
+    <input type="file" id="fileInput" accept="image/*" multiple>
+    <div class="drop-content">
+      <div class="drop-icon-wrap">
+        <svg width="36" height="36" viewBox="0 0 36 36" fill="none">
+          <path d="M18 4 L18 25 M9 16 L18 4 L27 16" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M5 30 L31 30" stroke="currentColor" stroke-width="2" stroke-linecap="round" opacity="0.4"/>
+        </svg>
+      </div>
+      <div class="drop-title">Drop images here</div>
+      <div class="drop-sub">JPG · PNG · WEBP · BMP — multiple files supported</div>
+    </div>
+  </div>
+
+  <!-- ── Presets Row ── -->
+  <div class="presets-row">
+    <span class="presets-label">PRESET</span>
+    <div class="preset-group">
+      <button class="preset-btn" data-preset="quick" onclick="applyPreset('quick')">⚡ Quick</button>
+      <button class="preset-btn active" data-preset="balanced" onclick="applyPreset('balanced')">⚖ Balanced</button>
+      <button class="preset-btn" data-preset="max" onclick="applyPreset('max')">💎 Max Quality</button>
+    </div>
+  </div>
+
+  <!-- ── Settings Grid ── -->
+  <div class="settings" id="settingsGrid">
+
+    <!-- Always visible -->
+    <div class="sg">
+      <label>Upscale Method</label>
+      <select id="upscaleMethod">
+        <option value="lanczos">Lanczos-3 (sharpest)</option>
+        <option value="bicubic">Bicubic (fast)</option>
+      </select>
+    </div>
+    <div class="sg">
+      <label>Upscale Factor</label>
+      <select id="upscaleFactor">
+        <option value="2">2× — Recommended</option>
+        <option value="1.5">1.5×</option>
+        <option value="3">3×</option>
+        <option value="4">4×</option>
+      </select>
+    </div>
+    <div class="sg">
+      <label>Shopify Max Dimension</label>
+      <select id="shopifySize">
+        <option value="2048">2048px — Master</option>
+        <option value="1024">1024px — Standard</option>
+        <option value="800">800px — Compact</option>
+        <option value="4472">4472px — Max (20MP)</option>
+      </select>
+    </div>
+    <div class="sg">
+      <label>WebP Quality <span class="rval" id="qv">85</span></label>
+      <div class="sg-range">
+        <input type="range" id="webpQ" min="40" max="100" value="85"
+          oninput="document.getElementById('qv').textContent=this.value">
+      </div>
+    </div>
+    <div class="sg">
+      <label>Max Output (KB)</label>
+      <input type="number" id="maxKB" value="500" min="50" max="5000" step="50">
+    </div>
+    <div class="sg">
+      <label>Rename Pattern</label>
+      <input type="text" id="renamePattern" placeholder="{name} or product_{n}" style="font-size:11px">
+    </div>
+
+    <!-- Flow 2 only -->
+    <div class="sg sg-hidden" id="bgModelGroup">
+      <label>AI Model</label>
+      <select id="bgModel">
+        <option value="isnet">ISNet General (best quality)</option>
+        <option value="isnet_fp16">ISNet FP16 (faster, ~same quality)</option>
+        <option value="isnet_quint8">ISNet Quint8 (fastest, smaller download)</option>
+      </select>
+      <div class="sg-hint">First run downloads model · cached in browser forever</div>
+    </div>
+    <div class="sg sg-hidden" id="bgSensGroup">
+      <label>Alpha Threshold <span class="rval" id="bgsv">80</span></label>
+      <div class="sg-range">
+        <input type="range" id="bgSens" min="1" max="80" value="80"
+          oninput="document.getElementById('bgsv').textContent=this.value">
+      </div>
+      <div class="sg-hint">↑ higher = harder cut, fewer stray pixels</div>
+    </div>
+    <div class="sg sg-hidden" id="bgFeatherGroup">
+      <label>Edge Feather px <span class="rval" id="bffv">1</span></label>
+      <div class="sg-range">
+        <input type="range" id="bgFeather" min="0" max="10" value="1"
+          oninput="document.getElementById('bffv').textContent=this.value">
+      </div>
+      <div class="sg-hint">0 = crisp · higher = softer edge</div>
+    </div>
+<div class="sg sg-hidden" id="bgOutputGroup">
+      <label>Output Format</label>
+      <select id="bgOutputFormat">
+        <option value="webp">WebP (smaller file)</option>
+        <option value="png">PNG (lossless transparency)</option>
+      </select>
+      <div class="sg-hint">PNG preserves full alpha · WebP is smaller for Shopify</div>
+    </div>
+
+    <!-- Flow 3 — Unified Smart Resize -->
+    <div class="sg sg-hidden resize-setting" id="resizeWGroup">
+      <label>Target Width (px)</label>
+      <input type="number" id="resizeW" value="1200" min="1" max="20000" step="1" oninput="updateResizePreview()">
+      <div class="sg-hint" id="resizeWHint">Auto: crop if larger · extend if smaller</div>
+    </div>
+    <div class="sg sg-hidden resize-setting" id="resizeHGroup">
+      <label>Target Height (px)</label>
+      <input type="number" id="resizeH" value="1200" min="1" max="20000" step="1" oninput="updateResizePreview()">
+      <div class="sg-hint" id="resizeHHint">Auto: crop if larger · extend if smaller</div>
+    </div>
+    <div class="sg sg-hidden resize-setting" id="resizeModeGroup">
+      <label>Resize Mode</label>
+      <select id="resizeMode" onchange="onResizeModeChange()">
+        <option value="smart-crop-extend">Smart Auto (Crop + Extend)</option>
+        <option value="proportional">Proportional Fit (letterbox)</option>
+      </select>
+      <div class="sg-hint">Per-axis smart detection vs. ratio-preserving fit</div>
+    </div>
+    <div class="sg sg-hidden resize-setting" id="resizeFocusGroup">
+      <label>Crop Focus</label>
+      <select id="resizeFocus">
+        <option value="smart">Smart (saliency detection)</option>
+        <option value="center">Center</option>
+        <option value="top">Top</option>
+        <option value="bottom">Bottom</option>
+        <option value="left">Left</option>
+        <option value="right">Right</option>
+      </select>
+      <div class="sg-hint">Used when cropping dimension(s)</div>
+    </div>
+    <div class="sg sg-hidden resize-setting" id="resizeAlignGroup">
+      <label>Image Anchor</label>
+      <select id="resizeAlign">
+        <option value="center">Center</option>
+        <option value="top-left">Top Left</option>
+        <option value="top-center">Top Center</option>
+        <option value="top-right">Top Right</option>
+        <option value="middle-left">Middle Left</option>
+        <option value="middle-right">Middle Right</option>
+        <option value="bottom-left">Bottom Left</option>
+        <option value="bottom-center">Bottom Center</option>
+        <option value="bottom-right">Bottom Right</option>
+      </select>
+      <div class="sg-hint">Where image sits when extending / fitting</div>
+    </div>
+    <div class="sg sg-hidden resize-setting" id="resizeBlendGroup">
+      <label>Edge Blend <span class="rval" id="rbrv">40</span>px</label>
+      <div class="sg-range">
+        <input type="range" id="resizeBlend" min="0" max="80" value="40"
+          oninput="document.getElementById('rbrv').textContent=this.value">
+      </div>
+      <div class="sg-hint">Softens extension seam (0 = sharp)</div>
+    </div>
+    <div class="sg sg-hidden resize-setting" id="resizeFillGroup">
+      <label>Extension / BG Fill</label>
+      <select id="resizeFill" onchange="toggleFillColor()">
+        <option value="extend">Edge pixels (seamless)</option>
+        <option value="ai-extend" selected>🤖 AI Fill — LaMa ONNX (smart)</option>
+        <option value="white">White</option>
+        <option value="black">Black</option>
+        <option value="transparent">Transparent (PNG)</option>
+        <option value="color">Custom Color</option>
+      </select>
+      <div class="sg-hint">Applies to extended / letterbox areas</div>
+    </div>
+    <div class="sg sg-hidden" id="fillColorGroup">
+      <label>Custom Fill Color</label>
+      <div class="color-pick-row">
+        <input type="color" id="fillColor" value="#ffffff" class="color-input"
+          oninput="document.getElementById('fillColorHex').textContent=this.value">
+        <span class="color-hex" id="fillColorHex">#ffffff</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Resize Live Preview Banner ── -->
+  <div class="resize-preview sg-hidden" id="resizePreview">
+    <div class="rp-col">
+      <div class="rp-label">SOURCE</div>
+      <div class="rp-dims" id="rpSrc">—</div>
+    </div>
+    <div class="rp-arrow">
+      <svg width="28" height="14" viewBox="0 0 28 14" fill="none">
+        <path d="M1 7h24M18 1l6 6-6 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </div>
+    <div class="rp-decision" id="rpDecision">
+      <div class="rp-axis" id="rpW"></div>
+      <div class="rp-axis" id="rpH"></div>
+    </div>
+    <div class="rp-arrow">
+      <svg width="28" height="14" viewBox="0 0 28 14" fill="none">
+        <path d="M1 7h24M18 1l6 6-6 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </div>
+    <div class="rp-col">
+      <div class="rp-label">TARGET</div>
+      <div class="rp-dims" id="rpTarget">—</div>
+    </div>
+  </div>
+
+  <!-- ── Info Banners ── -->
+  <div class="extend-info sg-hidden" id="resizeInfo">
+    <div class="ei-icon">⚡</div>
+    <div class="ei-text">
+      <div class="ei-title">Smart Auto-Resize — Per Image, Per Axis, Never Distorted</div>
+      <div class="ei-desc">
+        Each image is compared against your target <em>per axis</em> independently.
+        <strong>Wider</strong> than target → object-aware crop (saliency, not just faces).
+        <strong>Narrower</strong> → seamless canvas extension via directional gradient sampling (no banding).
+        <strong>Exact match on an axis</strong> → passthrough for that axis.
+        Switch to <strong>Proportional Fit</strong> to never crop — only letterbox/pillarbox.
+        Set <strong>Fill → Transparent</strong> to keep extended areas as alpha (saves as PNG).
+        <strong>AI Fill</strong> uses <em>LaMa ONNX</em> (Carve/LaMa-ONNX, Apache 2.0) — a 51M-parameter
+        inpainting model running 100% in-browser via <em>onnxruntime-web</em> (WebGPU → WASM fallback).
+        First run downloads ~208 MB and caches it in IndexedDB forever.
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Flow 2 Info Banner ── -->
+  <div class="extend-info f2-info sg-hidden" id="bgInfo">
+    <div class="ei-icon">🧠</div>
+    <div class="ei-text">
+      <div class="ei-title" style="color:var(--a3)">ISNet Background Removal — ONNX Runtime, 100% Local</div>
+      <div class="ei-desc">
+        Powered by <strong>@imgly/background-removal</strong> running <em>ISNet-General-Use</em> in-browser via ONNX Runtime.
+        <strong>First run</strong> downloads ~45 MB model weights (cached forever after).
+        A live <strong>progress bar</strong> shows per-file download status.
+        Choose <strong>ISNet FP16</strong> for faster inference or <strong>Quint8</strong> for the smallest download.
+        Output as <em>WebP</em> for Shopify or <em>PNG</em> to keep full lossless transparency.
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Log ── -->
+  <div class="log-wrap" id="logWrap"></div>
+
+  <!-- ── Queue ── -->
+  <div class="q-hdr">
+    <div class="q-label">QUEUE <span id="qCount">0 files</span></div>
+    <button class="btn-ghost" onclick="clearQueue()">CLEAR ALL</button>
+  </div>
+  <div class="queue-list" id="queueList">
+    <div class="empty" id="emptyMsg">No images queued · drop files above to begin</div>
+  </div>
+
+  <button class="run-btn" id="runBtn" onclick="runPipeline()" disabled>
+    <span class="run-icon">▶</span>
+    <span>Run Pipeline</span>
+  </button>
+
+  <!-- ── Results ── -->
+  <div id="resultsSection" style="display:none">
+    <div class="res-hdr">
+      <span>Output Files</span>
+      <span id="resCount" class="res-count"></span>
+    </div>
+    <div class="res-grid" id="resGrid"></div>
+    <button class="dl-all" onclick="downloadAll()">
+      <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+        <path d="M7 1v8M3 6l4 4 4-4M1 12h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      Download All as ZIP
+    </button>
+  </div>
+
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script src="script.js"></script>
+</body>
+</html>
