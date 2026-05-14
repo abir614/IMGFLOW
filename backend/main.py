@@ -64,7 +64,7 @@ async def process_image(
     resize_focus:      str        = Form("smart"),
     resize_align:      str        = Form("center"),
     resize_blend:      int        = Form(40),
-    resize_fill:       str        = Form("extend"),
+    resize_fill:       str        = Form("ai-extend"),
     fill_color:        str        = Form("#ffffff"),
 
     # Rename
@@ -131,15 +131,19 @@ async def process_image(
 
     mime = "image/png" if out_ext == "png" else "image/webp"
 
+    def _ascii(s: str) -> str:
+        """Strip non-latin-1 characters so HTTP headers never crash."""
+        return s.encode("latin-1", errors="replace").decode("latin-1")
+
     return Response(
         content=result["blob"],
         media_type=mime,
         headers={
-            "Content-Disposition": f'attachment; filename="{out_name}"',
-            "X-IMGFLOW-Dims":      result["dims"],
-            "X-IMGFLOW-Log":       " | ".join(result["log"]),
+            "Content-Disposition": f'attachment; filename="{_ascii(out_name)}"',
+            "X-IMGFLOW-Dims":      _ascii(result["dims"]),
+            "X-IMGFLOW-Log":       _ascii(" | ".join(result["log"])),
             "X-IMGFLOW-Time":      f"{elapsed:.2f}s",
-            "X-IMGFLOW-Name":      out_name,
+            "X-IMGFLOW-Name":      _ascii(out_name),
         },
     )
 
@@ -170,7 +174,7 @@ async def process_batch(
     resize_focus:      str        = Form("smart"),
     resize_align:      str        = Form("center"),
     resize_blend:      int        = Form(40),
-    resize_fill:       str        = Form("extend"),
+    resize_fill:       str        = Form("ai-extend"),
     fill_color:        str        = Form("#ffffff"),
 
     rename_pattern:    str        = Form(""),

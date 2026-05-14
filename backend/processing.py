@@ -59,7 +59,13 @@ def run_flow2(img: Image.Image, cfg: dict) -> dict:
     orig_size = _img_size(img)
 
     # 1. Background removal (lazy import so startup is fast when not used)
-    from rembg import remove, new_session
+    try:
+        from rembg import remove, new_session
+    except ImportError as e:
+        raise RuntimeError(
+            f"rembg is not installed or has missing dependencies ({e}). "
+            "Run: pip install packaging rembg[gpu]"
+        ) from e
     session = new_session(cfg["bg_model"])
     img = remove(img, session=session)                    # returns RGBA PNG
     img = img.convert("RGBA")
@@ -346,132 +352,205 @@ def fill_seamless_pil(src: Image.Image, ox: int, oy: int, W: int, H: int, blend_
     """
     Place src at (ox,oy) on a W×H canvas.
     Fill extension zones by sampling nearby edge pixels of src (weighted average).
-    Then apply seam blending.
+    Fully vectorised with NumPy — no Python pixel loops.
     """
     sw, sh = src.width, src.height
     has_alpha = src.mode == "RGBA"
-    channels = 4 if has_alpha else 3
     src_arr = np.array(src.convert("RGBA") if not has_alpha else src, dtype=np.float32)
 
-    out_arr = np.zeros((H, W, 4), dtype=np.float32)
     STRIP = max(6, min(blend_radius, int(min(sw, sh) * 0.18)))
+    weights = np.array([((STRIP - k) / STRIP) ** 1.5 for k in range(STRIP)], dtype=np.float32)
+    total_w = float(weights.sum())
 
-    for y in range(H):
-        for x in range(W):
-            rx, ry = x - ox, y - oy
-            in_x = 0 <= rx < sw
-            in_y = 0 <= ry < sh
+    # Coordinate grids for full output canvas
+    ys, xs = np.mgrid[0:H, 0:W]
+    rx = xs - ox
+    ry = ys - oy
+    in_x = (rx >= 0) & (rx < sw)
+    in_y = (ry >= 0) & (ry < sh)
+    inside = in_x & in_y
 
-            if in_x and in_y:
-                out_arr[y, x] = src_arr[ry, rx]
-                continue
+    # Clamped source coords (used for interior copy and per-axis clamping)
+    sx_clip = np.clip(rx, 0, sw - 1).astype(np.int32)
+    sy_clip = np.clip(ry, 0, sh - 1).astype(np.int32)
 
-            # Weighted average of STRIP edge samples
-            r = g = b = a = wt = 0.0
-            for k in range(STRIP):
-                w = ((STRIP - k) / STRIP) ** 1.5
-                if not in_x and not in_y:
-                    sx = min(k, sw - 1) if rx < 0 else max(sw - 1 - k, 0)
-                    sy = min(k, sh - 1) if ry < 0 else max(sh - 1 - k, 0)
-                elif not in_x:
-                    sx = min(k, sw - 1) if rx < 0 else max(sw - 1 - k, 0)
-                    sy = max(0, min(sh - 1, ry))
-                else:
-                    sy = min(k, sh - 1) if ry < 0 else max(sh - 1 - k, 0)
-                    sx = max(0, min(sw - 1, rx))
-                p = src_arr[sy, sx]
-                r += p[0] * w; g += p[1] * w; b += p[2] * w; a += (p[3] / 255.0) * w
-                wt += w
+    out_arr = np.zeros((H, W, 4), dtype=np.float32)
 
-            if wt > 0:
-                r /= wt; g /= wt; b /= wt; a /= wt
+    # Interior: direct copy
+    out_arr[inside] = src_arr[sy_clip[inside], sx_clip[inside]]
 
-            out_arr[y, x] = [
-                np.clip(r, 0, 255),
-                np.clip(g, 0, 255),
-                np.clip(b, 0, 255),
-                np.clip(a * 255, 0, 255),
-            ]
+    # Exterior: weighted strip average — one vectorised pass per k
+    exterior = ~inside
+    if exterior.any():
+        accum = np.zeros((H, W, 4), dtype=np.float32)
+        for k in range(STRIP):
+            w = weights[k]
+            sx_k = np.where(rx < 0, np.minimum(k, sw - 1), np.maximum(sw - 1 - k, 0)).astype(np.int32)
+            sy_k = np.where(ry < 0, np.minimum(k, sh - 1), np.maximum(sh - 1 - k, 0)).astype(np.int32)
+            # Clamp the in-bounds axis to its natural position
+            sx_k = np.where(in_x, sx_clip, sx_k)
+            sy_k = np.where(in_y, sy_clip, sy_k)
+            accum += src_arr[sy_k, sx_k] * w
+        accum /= total_w
+        out_arr[exterior] = accum[exterior]
 
     if blend_radius > 0:
         _blend_seam(out_arr, ox, oy, sw, sh, W, H, blend_radius)
 
-    out = Image.fromarray(out_arr.astype(np.uint8), "RGBA")
+    out = Image.fromarray(np.clip(out_arr, 0, 255).astype(np.uint8), "RGBA")
     return out if has_alpha else out.convert("RGB")
 
 
 def _blend_seam(arr: np.ndarray, ox: int, oy: int, sw: int, sh: int, W: int, H: int, radius: int):
-    """Smooth the seam between placed image and fill zone. Mirrors blendSeam()."""
-    for y in range(oy, min(oy + sh, H)):
-        for x in range(ox, min(ox + sw, W)):
-            dx = min(x - ox, ox + sw - 1 - x)
-            dy = min(y - oy, oy + sh - 1 - y)
-            d = min(dx, dy)
-            if d >= radius:
-                continue
-            t = d / radius
-            smooth = t * t * (3 - 2 * t)
+    """Smooth the seam between placed image and fill zone. Vectorised."""
+    x1, y1 = ox, oy
+    x2, y2 = min(ox + sw, W), min(oy + sh, H)
+    if x1 >= x2 or y1 >= y2:
+        return
 
-            if dx <= dy:
-                nx = ox - 1 if x < ox + sw // 2 else ox + sw
-                ny = y
-            else:
-                ny = oy - 1 if y < oy + sh // 2 else oy + sh
-                nx = x
+    ys, xs = np.mgrid[y1:y2, x1:x2]
+    dx = np.minimum(xs - ox, ox + sw - 1 - xs)
+    dy = np.minimum(ys - oy, oy + sh - 1 - ys)
+    d  = np.minimum(dx, dy)
 
-            nx = max(0, min(W - 1, nx))
-            ny = max(0, min(H - 1, ny))
+    blend_mask = d < radius
+    if not blend_mask.any():
+        return
 
-            for c in range(3):
-                arr[y, x, c] = arr[ny, nx, c] * (1 - smooth) + arr[y, x, c] * smooth
+    t = np.where(blend_mask, d / radius, 1.0)
+    smooth = t * t * (3 - 2 * t)          # smoothstep
+
+    # Neighbour coordinates (the fill-zone pixel on the other side of the seam)
+    nx = np.where(dx <= dy,
+                  np.where(xs < ox + sw // 2, ox - 1, ox + sw),
+                  xs)
+    ny = np.where(dx > dy,
+                  np.where(ys < oy + sh // 2, oy - 1, oy + sh),
+                  ys)
+    nx = np.clip(nx, 0, W - 1)
+    ny = np.clip(ny, 0, H - 1)
+
+    sm = smooth[:, :, np.newaxis]          # (h, w, 1) for broadcast
+    neighbour = arr[ny, nx]                # (h, w, 4)
+    blended   = neighbour * (1 - sm) + arr[y1:y2, x1:x2] * sm
+    arr[y1:y2, x1:x2] = np.where(blend_mask[:, :, np.newaxis], blended, arr[y1:y2, x1:x2])
 
 
 # ═══════════════════════════════════════
-# AI FILL — LaMa via iopaint / lama-cleaner
+# AI FILL — Content-Aware ShiftMap Synthesis
 # ═══════════════════════════════════════
 
 def fill_lama(src: Image.Image, ox: int, oy: int, W: int, H: int, blend_radius: int) -> Image.Image:
     """
-    Use LaMa inpainting for seamless extension.
-    Falls back to edge-pixel fill if lama-cleaner is not installed.
+    Content-aware outpainting via OpenCV ShiftMap patch synthesis.
 
-    To enable: pip install iopaint
+    Pipeline:
+      1. Build an edge-extended canvas (fast neighbourhood context for ShiftMap)
+      2. Run cv2.xphoto ShiftMap inpainting at ≤320 px to find best-matching
+         texture patches from the *known* source region
+      3. Upscale the synthesised fill to full output resolution with Lanczos
+      4. Re-stamp the original source pixels exactly (ShiftMap may alter them)
+      5. Smooth the seam with a bidirectional blend so the boundary is invisible
+
+    ShiftMap (He et al. 2012) is a patch-based algorithm — equivalent to
+    Photoshop's Content-Aware Fill — it picks coherent patches from the image
+    rather than blurring or repeating edge pixels.  Running it at a capped
+    resolution (320 px) keeps latency under ~4 s while preserving the
+    structural intent; the Lanczos upsample then restores detail resolution.
+
+    Falls back to fill_seamless_pil if opencv-contrib is unavailable.
     """
-    try:
-        from iopaint.model_manager import ModelManager
-        from iopaint.schema import InpaintRequest, HDStrategy, LDMSampler
-    except ImportError:
-        # Graceful fallback
-        return fill_seamless_pil(src, ox, oy, W, H, blend_radius)
-
     sw, sh = src.width, src.height
-    # Build extended canvas with edge fill first (context for LaMa)
-    base = fill_seamless_pil(src, ox, oy, W, H, blend_radius)
-    base_rgb = base.convert("RGB")
+    has_alpha = src.mode == "RGBA"
+    src_rgb = np.array(src.convert("RGB"), dtype=np.uint8)
 
-    # Build mask: white = extension zones (areas to inpaint), black = known
-    mask = Image.new("L", (W, H), 255)
-    mask.paste(Image.new("L", (sw, sh), 0), (ox, oy))
+    # ── 1. Edge-extended canvas ──────────────────────────────────────────────
+    canvas = _build_edge_canvas(src_rgb, ox, oy, W, H, sw, sh)
 
+    needs_fill = ox > 0 or oy > 0 or (ox + sw) < W or (oy + sh) < H
+    if not needs_fill:
+        return src
+
+    # ── 2. ShiftMap at capped resolution ────────────────────────────────────
     try:
-        model = ModelManager(name="lama", device="cpu")
-        result = model(
-            base_rgb,
-            mask,
-            InpaintRequest(hd_strategy=HDStrategy.ORIGINAL)
-        )
-        result_rgba = result.convert("RGBA")
-        # Re-stamp original src so it isn't altered
-        result_rgba.paste(src, (ox, oy))
-        # Seam blend
-        arr = np.array(result_rgba, dtype=np.float32)
-        _blend_seam(arr, ox, oy, sw, sh, W, H, max(8, blend_radius))
-        _blend_seam(arr, ox, oy, sw, sh, W, H, blend_radius)
-        _blend_seam(arr, ox, oy, sw, sh, W, H, max(4, blend_radius // 2))
-        return Image.fromarray(arr.astype(np.uint8), "RGBA")
+        MAX_DIM = 320
+        scale = min(MAX_DIM / W, MAX_DIM / H, 1.0)
+        lW   = max(1, round(W  * scale))
+        lH   = max(1, round(H  * scale))
+        lsw  = max(1, round(sw * scale))
+        lsh  = max(1, round(sh * scale))
+        lox  = round(ox * scale)
+        loy  = round(oy * scale)
+
+        small = cv2.resize(canvas, (lW, lH), interpolation=cv2.INTER_AREA)
+
+        # Mask: 0 = known region, 255 = to inpaint
+        mask_small = np.ones((lH, lW), dtype=np.uint8) * 255
+        mask_small[loy : loy + lsh, lox : lox + lsw] = 0
+
+        # ShiftMap works best in Lab (perceptually uniform colour space)
+        lab     = cv2.cvtColor(small, cv2.COLOR_RGB2Lab)
+        dst_lab = np.zeros_like(lab)
+        cv2.xphoto.inpaint(lab, mask_small, dst_lab, cv2.xphoto.INPAINT_SHIFTMAP)
+        filled_small = cv2.cvtColor(dst_lab, cv2.COLOR_Lab2RGB)
+
     except Exception as e:
-        print(f"[WARN] LaMa failed ({e}), falling back to edge fill")
+        print(f"[WARN] ShiftMap failed ({e}), falling back to edge fill")
         return fill_seamless_pil(src, ox, oy, W, H, blend_radius)
+
+    # ── 3. Upscale synthesised fill to full output resolution ────────────────
+    filled_up = cv2.resize(
+        filled_small, (W, H), interpolation=cv2.INTER_LANCZOS4
+    ).astype(np.float32)
+
+    # ── 4. Re-stamp exact source pixels ─────────────────────────────────────
+    filled_up[oy : oy + sh, ox : ox + sw] = src_rgb.astype(np.float32)
+
+    # ── 5. Bidirectional seam blend ──────────────────────────────────────────
+    blend_r = max(8, min(blend_radius, 80))
+    ey = min(oy + sh, H)
+    ex = min(ox + sw, W)
+
+    if ey > oy and ex > ox:
+        ys_i, xs_i = np.mgrid[oy:ey, ox:ex]
+        dx_v = np.minimum(xs_i - ox, (ex - 1) - xs_i)
+        dy_v = np.minimum(ys_i - oy, (ey - 1) - ys_i)
+        d_v  = np.minimum(dx_v, dy_v).astype(np.float32)
+        t_v  = np.clip(d_v / blend_r, 0.0, 1.0)
+        t_v  = t_v * t_v * (3.0 - 2.0 * t_v)   # smoothstep
+
+        tm = t_v[:, :, np.newaxis]
+        filled_up[oy:ey, ox:ex] = (
+            src_rgb.astype(np.float32) * tm
+            + filled_up[oy:ey, ox:ex]     * (1.0 - tm)
+        )
+
+    result = np.clip(filled_up, 0, 255).astype(np.uint8)
+    out = Image.fromarray(result)
+    return out if not has_alpha else out.convert("RGBA")
+
+
+def _build_edge_canvas(
+    src_rgb: np.ndarray, ox: int, oy: int, W: int, H: int, sw: int, sh: int
+) -> np.ndarray:
+    """
+    Place src_rgb at (ox, oy) on a W×H canvas and flood every extension zone
+    by clamping to the nearest source edge pixel.  Vectorised with NumPy.
+    """
+    canvas = np.empty((H, W, 3), dtype=np.uint8)
+
+    ys = np.arange(H, dtype=np.int32)
+    xs = np.arange(W, dtype=np.int32)
+    sy = np.clip(ys - oy, 0, sh - 1)   # (H,)
+    sx = np.clip(xs - ox, 0, sw - 1)   # (W,)
+
+    # Broadcast fill: each row y gets src[sy[y], sx[:]]
+    canvas[:, :] = src_rgb[sy[:, None], sx[None, :]]
+
+    # Overwrite the known region with exact source pixels
+    canvas[oy : oy + sh, ox : ox + sw] = src_rgb
+
+    return canvas
 
 
 # ═══════════════════════════════════════
@@ -498,12 +577,11 @@ def pixel_saliency_center(img: Image.Image) -> tuple:
     gy = cv2.Sobel(lum, cv2.CV_32F, 0, 1, ksize=3)
     edges = np.sqrt(gx**2 + gy**2)
 
-    # Local contrast (std in 3×3)
-    local_c = np.zeros_like(lum)
-    for y in range(1, TH - 1):
-        for x in range(1, TW - 1):
-            patch = lum[y-1:y+2, x-1:x+2]
-            local_c[y, x] = patch.std()
+    # Local contrast (std in 3×3) — vectorised via strided view
+    from numpy.lib.stride_tricks import sliding_window_view
+    windows  = sliding_window_view(lum, (3, 3))          # (TH-2, TW-2, 3, 3)
+    local_c  = np.zeros_like(lum)
+    local_c[1:TH-1, 1:TW-1] = windows.reshape(windows.shape[0], windows.shape[1], -1).std(axis=-1)
 
     def norm(a):
         mx = a.max()

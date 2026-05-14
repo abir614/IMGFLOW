@@ -1,11 +1,12 @@
-fastapi==0.115.5
-uvicorn[standard]==0.32.1
-python-multipart==0.0.12
-Pillow==11.0.0
-numpy==2.1.3
-opencv-python-headless==4.10.0.84
-scipy==1.14.1
+# fastapi pinned to 0.108.0 — required by iopaint (LaMa fill support)
+fastapi==0.108.0
+uvicorn[standard]>=0.30.0
+python-multipart>=0.0.9
+Pillow==9.5.0
+numpy>=1.24.0
+opencv-python-headless>=4.8.0
+scipy>=1.11.0
+packaging
 rembg[gpu]==2.0.59
-onnxruntime==1.20.1
-# Optional: uncomment for LaMa AI fill support (adds ~2 GB to image)
-# iopaint==1.4.1
+onnxruntime>=1.16.0
+iopaint==1.6.0
