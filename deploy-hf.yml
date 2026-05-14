@@ -1,0 +1,74 @@
+name: Deploy to Hugging Face Spaces
+
+on:
+  push:
+    branches:
+      - main          # triggers on every push to main
+  workflow_dispatch:  # allows manual trigger from GitHub Actions UI
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout your repo ────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # full history so git log works
+          lfs: false
+
+      # ── 2. Set up Python (needed for huggingface_hub CLI) ────────────────────
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # ── 3. Install Hugging Face Hub CLI ─────────────────────────────────────
+      - name: Install huggingface_hub
+        run: pip install huggingface_hub
+
+      # ── 4. Push to Hugging Face Space ────────────────────────────────────────
+      # Requires two repository secrets:
+      #   HF_TOKEN  — your Hugging Face write-access token
+      #               (Settings → Access Tokens → New token → write)
+      #   HF_SPACE  — your Space repo ID, e.g.  abir614/imgflow
+      #               (format: <hf-username>/<space-name>)
+      - name: Push to Hugging Face Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_SPACE: ${{ secrets.HF_SPACE }}
+        run: |
+          python - <<'EOF'
+          import os
+          from huggingface_hub import HfApi
+
+          api = HfApi(token=os.environ["HF_TOKEN"])
+          space_id = os.environ["HF_SPACE"]
+
+          # Files to upload — add any new assets here
+          files = [
+              "Dockerfile",
+              "README.md",
+              "index.html",
+              "style.css",
+              "script.js",
+              "backend/main.py",
+              "backend/processing.py",
+              "backend/requirements.txt",
+          ]
+
+          for f in files:
+              if not os.path.exists(f):
+                  print(f"  ⚠ skipping {f} (not found)")
+                  continue
+              api.upload_file(
+                  path_or_fileobj=f,
+                  path_in_repo=f,
+                  repo_id=space_id,
+                  repo_type="space",
+              )
+              print(f"  ✓ uploaded {f}")
+
+          print("🚀 Deployment complete →", f"https://huggingface.co/spaces/{space_id}")
+          EOF
