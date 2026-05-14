@@ -102,4 +102,4 @@ ENV U2NET_HOME=/app/.u2net \
 EXPOSE 7860
 
 # Single worker — rembg/onnxruntime/iopaint are not thread-safe across workers
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "7860", "--workers", "1"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "7860", "--workers", "4"]
