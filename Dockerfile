@@ -139,11 +139,7 @@ COPY --from=builder --chown=65532:65532 /opt/models  /opt/models
 WORKDIR /app
 COPY --from=builder --chown=65532:65532 /app/main.py       ./
 COPY --from=builder --chown=65532:65532 /app/processing.py ./
-# Cache-bust: change this value to force HuggingFace to rebuild from this layer.
-# HF caches aggressively by layer hash — incrementing CACHE_BUST invalidates
-# all layers from this point down without touching earlier cached layers.
-ARG CACHE_BUST=2
-COPY --chown=65532:65532 index.html style.css script.js favicon.ico ./static/
+COPY --chown=65532:65532 index.html style.css script.js ./static/
 
 # ── Security: run as nonroot (UID 65532 = distroless "nonroot" user) ─────
 USER nonroot
