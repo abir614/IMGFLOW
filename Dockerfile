@@ -83,12 +83,10 @@ RUN chown -R 65532:65532 /opt/venv /opt/models /app
 FROM debian:12-slim AS syslibs
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        # cv2 (headless) links libglib-2.0.so.0 + libgthread-2.0.so.0
         libglib2.0-0 \
-        # torch CPU kernels use libgomp.so.1 for OpenMP parallelism
         libgomp1 \
-        # libpcre2-8 is a transitive dep of libglib2.0
         libpcre2-8-0 \
+        libgl1 \
     && rm -rf /var/lib/apt/lists/*
 
 
@@ -121,12 +119,15 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # Paths are Debian 12 (bookworm) x86_64 — verified stable across patch releases.
 
 # libglib-2.0 + libgthread-2.0 (cv2 headless runtime deps)
-COPY --from=syslibs /usr/lib/x86_64-linux-gnu/libglib-2.0.so.0*   /usr/lib/x86_64-linux-gnu/
+COPY --from=syslibs /usr/lib/x86_64-linux-gnu/libglib-2.0.so.0*    /usr/lib/x86_64-linux-gnu/
 COPY --from=syslibs /usr/lib/x86_64-linux-gnu/libgthread-2.0.so.0* /usr/lib/x86_64-linux-gnu/
 # libgomp (torch CPU OpenMP kernels)
 COPY --from=syslibs /usr/lib/x86_64-linux-gnu/libgomp.so.1*        /usr/lib/x86_64-linux-gnu/
 # libpcre2-8 (glib transitive dep)
 COPY --from=syslibs /usr/lib/x86_64-linux-gnu/libpcre2-8.so.0*     /usr/lib/x86_64-linux-gnu/
+# libGL + libGLdispatch (cv2 headless needs these at import time)
+COPY --from=syslibs /usr/lib/x86_64-linux-gnu/libGL.so.1*          /usr/lib/x86_64-linux-gnu/
+COPY --from=syslibs /usr/lib/x86_64-linux-gnu/libGLdispatch.so.0*  /usr/lib/x86_64-linux-gnu/
 
 # ── Application files ────────────────────────────────────────────────────
 COPY --from=builder --chown=65532:65532 /opt/venv    /opt/venv
