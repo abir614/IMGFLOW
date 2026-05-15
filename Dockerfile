@@ -1,3 +1,40 @@
+# syntax=docker/dockerfile:1.7-labs
+
+# ═══════════════════════════════════════════════════════════════════════════
+# IMGFLOW — Distroless Production Dockerfile
+# Target: HuggingFace Spaces (CPU, x86_64, port 7860)
+#
+# Stage layout:
+#   builder  — python:3.11-slim-bookworm
+#              Installs all Python deps, pre-downloads AI models.
+#              Has gcc + curl + libGL for build-time imports (rembg, iopaint).
+#
+#   syslibs  — debian:12-slim
+#              Installs ONLY the system .so files that distroless is missing:
+#                libglib2.0-0  → libglib-2.0.so.0 + libgthread-2.0.so.0
+#                libgomp1      → libgomp.so.1  (torch CPU kernels)
+#                libpcre2-8-0  → libpcre2-8.so.0 (glib transitive dep)
+#              Nothing else — no Python, no pip, no shell utilities.
+#
+#   runtime  — gcr.io/distroless/python3-debian12:nonroot
+#              ~20 MB base. Contains Python 3.11, glibc, libssl, libz,
+#              libstdc++, libgcc_s. No shell, no package manager, no curl.
+#              Inherits /opt/venv + /opt/models from builder.
+#              Inherits missing .so files from syslibs.
+#
+# Why distroless over slim-bookworm:
+#   • Eliminates shell, apt, coreutils, etc. → smaller CVE surface
+#   • Forces immutable, minimal runtime — no exec into container possible
+#   • ~60–80 MB smaller final image
+#
+# Distroless constraints handled:
+#   • No shell → CMD must use exec-form JSON array (already the case)
+#   • No curl → HEALTHCHECK removed; use Docker/HF Spaces liveness probes
+#   • No /tmp by default → tmpfile use in rawpy gets /tmp from distroless base
+#   • UID 65532 (nonroot) → all paths chowned in builder before COPY
+# ═══════════════════════════════════════════════════════════════════════════
+
+
 # ───────────────────────────────────────────────────────────────────────────
 # Stage 1 — builder
 # ───────────────────────────────────────────────────────────────────────────
@@ -71,7 +108,9 @@ RUN find $VIRTUAL_ENV \( \
 
 # ── Fix ownership for distroless nonroot UID 65532 ───────────────────────
 # Must be done here because distroless has no chown/shell at runtime.
-RUN chown -R 65532:65532 /opt/venv /opt/models /app
+# Ensure venv python binary is addressable as python3.11 (distroless ENTRYPOINT needs exact name)
+RUN ln -sf /opt/venv/bin/python /opt/venv/bin/python3.11 2>/dev/null || true && \
+    chown -R 65532:65532 /opt/venv /opt/models /app
 
 
 # ───────────────────────────────────────────────────────────────────────────
@@ -139,7 +178,11 @@ COPY --from=builder --chown=65532:65532 /opt/models  /opt/models
 WORKDIR /app
 COPY --from=builder --chown=65532:65532 /app/main.py       ./
 COPY --from=builder --chown=65532:65532 /app/processing.py ./
-COPY --chown=65532:65532 index.html style.css script.js ./static/
+# Cache-bust: change this value to force HuggingFace to rebuild from this layer.
+# HF caches aggressively by layer hash — incrementing CACHE_BUST invalidates
+# all layers from this point down without touching earlier cached layers.
+ARG CACHE_BUST=2
+COPY --chown=65532:65532 index.html style.css script.js favicon.ico ./static/
 
 # ── Security: run as nonroot (UID 65532 = distroless "nonroot" user) ─────
 USER nonroot
@@ -152,7 +195,8 @@ EXPOSE 7860
 
 # Must use exec-form JSON array — distroless has no /bin/sh to parse strings.
 # uvicorn is at /opt/venv/bin/uvicorn (on PATH via VIRTUAL_ENV).
-CMD ["/opt/venv/bin/python3", "-m", "uvicorn", "main:app", \
+ENTRYPOINT ["/opt/venv/bin/python3.11"]
+CMD ["-m", "uvicorn", "main:app", \
      "--host", "0.0.0.0", \
      "--port", "7860", \
      "--workers", "1", \
