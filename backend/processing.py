@@ -536,54 +536,51 @@ def fill_lama(src: Image.Image, ox: int, oy: int, W: int, H: int, blend_radius: 
 
             inpaint_cfg = InpaintRequest(hd_strategy=hd_strategy)
 
-            # TILE_STEP: how many pixels to reveal per pass.
-            # Smaller = more passes but better quality on large extensions.
+            # TILE_STEP: pixels to expand per pass.
+            # We use distance-from-source-edge to determine pass order —
+            # no scipy binary_dilation needed (avoids giant kernel OOM).
             TILE_STEP = 300
             current = canvas.copy()
 
-            # Track which pixels are "known" (not needing fill).
-            # Starts as the source placement; grows each pass.
-            known = np.zeros((H, W), dtype=bool)
+            # Compute per-pixel Chebyshev distance from the known source rect.
+            # Distance 0 = inside source, distance N = N px away from edge.
+            ys, xs = np.mgrid[0:H, 0:W]
             if dst_x2 > dst_x1 and dst_y2 > dst_y1:
-                known[dst_y1:dst_y2, dst_x1:dst_x2] = True
+                dx = np.maximum(0, np.maximum(dst_x1 - xs, xs - (dst_x2 - 1)))
+                dy = np.maximum(0, np.maximum(dst_y1 - ys, ys - (dst_y2 - 1)))
+                dist = np.maximum(dx, dy)   # Chebyshev distance
+            else:
+                dist = np.ones((H, W), dtype=np.int32) * max(W, H)
 
-            # Build ordered list of strips to fill: left→right then right→left
-            # on x-axis, top→bottom then bottom→top on y-axis.
-            # Each pass expands the known region by TILE_STEP px.
-            passes = 0
-            max_passes = 20
+            total_fill = int((dist > 0).sum())
+            if total_fill == 0:
+                filled_up = canvas.astype(np.float32)
+            else:
+                max_dist = int(dist.max())
+                passes = 0
 
-            while passes < max_passes:
-                # Erode known region outward by TILE_STEP to find next strip
-                from scipy.ndimage import binary_dilation
-                struct = np.ones((TILE_STEP * 2 + 1, TILE_STEP * 2 + 1), dtype=bool)
-                expanded = binary_dilation(known, structure=struct)
-                expanded[:, :] &= True   # clamp to canvas
+                for step_start in range(0, max_dist, TILE_STEP):
+                    step_end = step_start + TILE_STEP
+                    # Mask: pixels in this distance band (not yet filled)
+                    strip_mask = (dist > step_start) & (dist <= step_end)
+                    # Full fill mask: this strip + anything beyond (context for LaMa)
+                    full_mask  = (dist > step_start)
 
-                strip_mask = expanded & ~known   # new zone to fill this pass
-                # Also include any still-unknown pixels outside expanded
-                remaining = ~expanded
-                full_fill_mask = (strip_mask | remaining)
+                    if not strip_mask.any():
+                        break
 
-                if not full_fill_mask.any():
-                    break   # all pixels known
+                    mask_pass = full_mask.astype(np.uint8) * 255
+                    result = _lama_inpaint_once(lama, current, mask_pass, inpaint_cfg)
 
-                mask_pass = full_fill_mask.astype(np.uint8) * 255
+                    # Commit only the strip pixels; keep closer-to-source pixels exact
+                    current[strip_mask] = result[strip_mask]
+                    passes += 1
+                    print(f"[INFO] LaMa pass {passes}: dist {step_start}→{step_end}px, "
+                          f"{strip_mask.sum()} px filled")
 
-                result = _lama_inpaint_once(lama, current, mask_pass, inpaint_cfg)
-
-                # Commit only the strip_mask pixels from this result;
-                # keep previously known pixels exact.
-                update_zone = strip_mask
-                current[update_zone] = result[update_zone]
-                known |= strip_mask
-
-                passes += 1
-                filled_pixels = strip_mask.sum()
-                print(f"[INFO] LaMa pass {passes}: filled {filled_pixels} px, known={known.sum()}/{W*H}")
-
-                if known.all():
-                    break
+                # Re-stamp exact source pixels (done below too, belt+braces)
+                if dst_x2 > dst_x1 and dst_y2 > dst_y1:
+                    current[dst_y1:dst_y2, dst_x1:dst_x2] = src_rgb[src_y1:src_y2, src_x1:src_x2]
 
             # Re-stamp exact source pixels
             if dst_x2 > dst_x1 and dst_y2 > dst_y1:
