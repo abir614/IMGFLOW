@@ -261,6 +261,52 @@ def health():
 # STATIC FILES (frontend)
 # ═══════════════════════════════════════
 
+@app.get("/api/debug/lama")
+def debug_lama():
+    """Introspect iopaint LaMa internals at runtime. Remove after debugging."""
+    import inspect, traceback
+    out = {}
+    try:
+        from iopaint.model.lama import LaMa
+        out["lama_file"] = inspect.getfile(LaMa)
+        out["mro"] = [c.__name__ for c in LaMa.__mro__]
+
+        # Find _pad_forward — may be on LaMa or a base class
+        for cls in LaMa.__mro__:
+            if "_pad_forward" in cls.__dict__:
+                out["_pad_forward_defined_on"] = cls.__name__
+                out["_pad_forward_sig"] = str(inspect.signature(cls._pad_forward))
+                out["_pad_forward_source"] = inspect.getsource(cls._pad_forward)
+                break
+        else:
+            out["_pad_forward_defined_on"] = "NOT FOUND"
+
+        # forward / __call__
+        for cls in LaMa.__mro__:
+            if "forward" in cls.__dict__:
+                out["forward_defined_on"] = cls.__name__
+                out["forward_sig"] = str(inspect.signature(cls.forward))
+                out["forward_source"] = inspect.getsource(cls.forward)
+                break
+
+    except Exception:
+        out["error"] = traceback.format_exc()
+
+    try:
+        from iopaint.schema import InpaintRequest, HDStrategy
+        out["HDStrategy_values"] = [e.value for e in HDStrategy]
+    except Exception as e:
+        out["HDStrategy_error"] = str(e)
+
+    try:
+        from iopaint.schema import InpaintRequest
+        out["InpaintRequest_fields"] = list(InpaintRequest.__fields__.keys()) if hasattr(InpaintRequest, "__fields__") else str(InpaintRequest)
+    except Exception as e:
+        out["InpaintRequest_error"] = str(e)
+
+    return JSONResponse(out)
+
+
 app.mount("/", StaticFiles(directory="static", html=True), name="static")
 
 
