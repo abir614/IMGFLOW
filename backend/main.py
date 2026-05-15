@@ -22,6 +22,86 @@ from PIL import Image
 
 from processing import run_flow1, run_flow2, run_flow3
 
+# Raw formats that need rawpy (Canon, Nikon, Sony, Fuji, etc.)
+_RAW_EXTENSIONS = {
+    ".cr2", ".cr3", ".nef", ".nrw", ".arw", ".srf", ".sr2",
+    ".dng", ".raf", ".orf", ".rw2", ".pef", ".srw", ".x3f",
+    ".3fr", ".mef", ".mrw", ".erf",
+}
+
+def open_image(raw: bytes, filename: str = "") -> Image.Image:
+    """
+    Open any image format into a Pillow RGB/RGBA Image.
+    Priority:
+      1. Camera RAW (rawpy)  — CR3, CR2, NEF, ARW, DNG, RAF, etc.
+      2. HEIC/HEIF           — pillow-heif
+      3. Pillow              — everything else (JPEG, PNG, WebP, TIFF, GIF, BMP…)
+    Raises ValueError with a human-readable message on failure.
+    """
+    ext = ("." + filename.rsplit(".", 1)[-1]).lower() if "." in filename else ""
+
+    # ── 1. Camera RAW ────────────────────────────────────────────────────────
+    if ext in _RAW_EXTENSIONS:
+        try:
+            import rawpy
+            import tempfile, os
+            with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+                tmp.write(raw)
+                tmp_path = tmp.name
+            try:
+                with rawpy.imread(tmp_path) as rp:
+                    rgb = rp.postprocess(use_camera_wb=True, output_bps=8)
+                return Image.fromarray(rgb, "RGB")
+            finally:
+                os.unlink(tmp_path)
+        except ImportError:
+            raise ValueError(
+                f"Camera RAW file ({ext}) requires rawpy. "
+                "Install it with: pip install rawpy"
+            )
+        except Exception as e:
+            raise ValueError(f"Failed to decode RAW file {filename}: {e}")
+
+    # ── 2. HEIC / HEIF ───────────────────────────────────────────────────────
+    if ext in (".heic", ".heif"):
+        try:
+            from pillow_heif import register_heif_opener
+            register_heif_opener()
+        except ImportError:
+            raise ValueError(
+                "HEIC/HEIF files require pillow-heif. "
+                "Install it with: pip install pillow-heif"
+            )
+
+    # ── 3. Pillow (covers JPEG, PNG, WebP, TIFF, GIF, BMP, HEIC if registered) ──
+    try:
+        img = Image.open(io.BytesIO(raw))
+        img.load()
+    except Exception:
+        # Last resort: try rawpy anyway (e.g. DNG uploaded without extension)
+        try:
+            import rawpy, tempfile, os
+            with tempfile.NamedTemporaryFile(suffix=ext or ".raw", delete=False) as tmp:
+                tmp.write(raw)
+                tmp_path = tmp.name
+            try:
+                with rawpy.imread(tmp_path) as rp:
+                    rgb = rp.postprocess(use_camera_wb=True, output_bps=8)
+                return Image.fromarray(rgb, "RGB")
+            finally:
+                os.unlink(tmp_path)
+        except Exception:
+            raise ValueError(
+                f"Cannot identify image format for \'{filename}\'. "
+                "Supported formats: JPEG, PNG, WebP, TIFF, GIF, BMP, HEIC, "
+                "and camera RAW files (CR3, CR2, NEF, ARW, DNG, RAF, ORF, RW2, etc.)"
+            )
+
+    # Normalise mode
+    if img.mode not in ("RGB", "RGBA"):
+        img = img.convert("RGBA" if "A" in img.getbands() else "RGB")
+    return img
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("imgflow")
 
@@ -73,12 +153,9 @@ async def process_image(
     # Read image
     raw = await file.read()
     try:
-        img = Image.open(io.BytesIO(raw))
-        img.load()
-        if img.mode not in ("RGB", "RGBA"):
-            img = img.convert("RGBA" if "A" in img.getbands() else "RGB")
-    except Exception as e:
-        raise HTTPException(400, f"Cannot read image: {e}")
+        img = open_image(raw, file.filename or "")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
     orig_name = file.filename or "image"
     base_name = orig_name.rsplit(".", 1)[0]
@@ -209,10 +286,7 @@ async def process_batch(
             base_name = orig_name.rsplit(".", 1)[0]
 
             try:
-                img = Image.open(io.BytesIO(raw))
-                img.load()
-                if img.mode not in ("RGB", "RGBA"):
-                    img = img.convert("RGBA" if "A" in img.getbands() else "RGB")
+                img = open_image(raw, upload.filename or "")
 
                 if flow == 1:
                     result = run_flow1(img, cfg)
