@@ -1,3 +1,6 @@
+# ───────────────────────────────────────────────────────────────────────────
+# Stage 1 — builder
+# ───────────────────────────────────────────────────────────────────────────
 FROM python:3.11-slim-bookworm AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -136,7 +139,11 @@ COPY --from=builder --chown=65532:65532 /opt/models  /opt/models
 WORKDIR /app
 COPY --from=builder --chown=65532:65532 /app/main.py       ./
 COPY --from=builder --chown=65532:65532 /app/processing.py ./
-COPY --chown=65532:65532 index.html style.css script.js    ./static/
+# Cache-bust: change this value to force HuggingFace to rebuild from this layer.
+# HF caches aggressively by layer hash — incrementing CACHE_BUST invalidates
+# all layers from this point down without touching earlier cached layers.
+ARG CACHE_BUST=2
+COPY --chown=65532:65532 index.html style.css script.js favicon.ico ./static/
 
 # ── Security: run as nonroot (UID 65532 = distroless "nonroot" user) ─────
 USER nonroot
@@ -149,7 +156,7 @@ EXPOSE 7860
 
 # Must use exec-form JSON array — distroless has no /bin/sh to parse strings.
 # uvicorn is at /opt/venv/bin/uvicorn (on PATH via VIRTUAL_ENV).
-CMD ["/opt/venv/bin/uvicorn", "main:app", \
+CMD ["/opt/venv/bin/python3", "-m", "uvicorn", "main:app", \
      "--host", "0.0.0.0", \
      "--port", "7860", \
      "--workers", "1", \
