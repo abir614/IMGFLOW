@@ -18,7 +18,7 @@
 # ============================================================
 # Stage 1 — Builder
 # ============================================================
-FROM python:3.14.5-slim-bookworm AS builder
+FROM python:3.12-slim-bookworm AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -86,7 +86,7 @@ RUN find $VIRTUAL_ENV \( \
 # ============================================================
 # Stage 2 — Runtime  (inherits nothing from builder except COPY)
 # ============================================================
-FROM python:3.14.5-slim-bookworm
+FROM python:3.12-slim-bookworm
 
 LABEL org.opencontainers.image.description="IMGFLOW — FastAPI image processing for HuggingFace Spaces"
 
@@ -136,7 +136,7 @@ RUN chown -R appuser:appuser /app /opt/models
 USER appuser
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-    CMD curl -fsS http://127.0.0.1:7860/api/health || exit 1
+CMD curl -fsS http://127.0.0.1:7860/api/health || exit 1
 
 EXPOSE 7860
 
