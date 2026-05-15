@@ -514,7 +514,12 @@ def fill_lama(src: Image.Image, ox: int, oy: int, W: int, H: int, blend_radius: 
     lama = _get_lama_model()
     if lama is not None and filled_up is None:
         try:
-            from iopaint.schema import InpaintRequest, HDStrategy
+            from iopaint.schema import InpaintRequest
+            try:
+                from iopaint.schema import HDStrategy
+                hd_strategy = HDStrategy.ORIGINAL
+            except (ImportError, AttributeError):
+                hd_strategy = "Original"
 
             # LaMa works best at ≤1024 px; scale down, inpaint, then upscale
             MAX_DIM = 1024
@@ -528,12 +533,13 @@ def fill_lama(src: Image.Image, ox: int, oy: int, W: int, H: int, blend_radius: 
             # Ensure mask is strictly binary for LaMa
             small_mask = (small_mask > 127).astype(np.uint8) * 255
 
-            cfg = InpaintRequest(hd_strategy=HDStrategy.ORIGINAL)
-            # LaMa.forward expects mask shape [H, W, 1] for _pad_forward
-            result_bgr = lama._pad_forward(small_canvas, small_mask[:, :, np.newaxis], cfg)
+            inpaint_cfg = InpaintRequest(hd_strategy=hd_strategy)
 
-            # result_bgr is BGR uint8
-            result_rgb_small = cv2.cvtColor(result_bgr, cv2.COLOR_BGR2RGB)
+            # iopaint 1.6 _pad_forward expects:
+            #   image: H×W×3 RGB uint8
+            #   mask:  H×W   uint8  (2-D, NOT H×W×1)
+            result_rgb_small = lama._pad_forward(small_canvas, small_mask, inpaint_cfg)
+            # _pad_forward returns RGB uint8 — no channel swap needed
 
             if scale < 1.0:
                 filled_up = cv2.resize(
