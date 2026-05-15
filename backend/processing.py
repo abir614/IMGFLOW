@@ -517,7 +517,7 @@ def fill_lama(src: Image.Image, ox: int, oy: int, W: int, H: int, blend_radius: 
             from iopaint.schema import InpaintRequest
             try:
                 from iopaint.schema import HDStrategy
-                hd_strategy = HDStrategy.ORIGINAL
+                hd_strategy = HDStrategy.Original
             except (ImportError, AttributeError):
                 hd_strategy = "Original"
 
@@ -531,15 +531,16 @@ def fill_lama(src: Image.Image, ox: int, oy: int, W: int, H: int, blend_radius: 
             small_mask   = cv2.resize(mask_full, (lW, lH), interpolation=cv2.INTER_NEAREST)
 
             # Ensure mask is strictly binary for LaMa
+            # mask must be 2-D [H, W] — forward() and _pad_forward() both expect this
             small_mask = (small_mask > 127).astype(np.uint8) * 255
 
             inpaint_cfg = InpaintRequest(hd_strategy=hd_strategy)
 
-            # iopaint 1.6 _pad_forward expects:
-            #   image: H×W×3 RGB uint8
-            #   mask:  H×W   uint8  (2-D, NOT H×W×1)
-            result_rgb_small = lama._pad_forward(small_canvas, small_mask, inpaint_cfg)
-            # _pad_forward returns RGB uint8 — no channel swap needed
+            # _pad_forward: image [H,W,3] RGB uint8, mask [H,W] uint8
+            # forward() internally does cvtColor(RGB2BGR) before model,
+            # then cvtColor(RGB2BGR) on output — so _pad_forward returns BGR
+            result_bgr = lama._pad_forward(small_canvas, small_mask, inpaint_cfg)
+            result_rgb_small = cv2.cvtColor(result_bgr, cv2.COLOR_BGR2RGB)
 
             if scale < 1.0:
                 filled_up = cv2.resize(
