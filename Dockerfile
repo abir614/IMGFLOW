@@ -1,40 +1,3 @@
-# syntax=docker/dockerfile:1.7-labs
-
-# ═══════════════════════════════════════════════════════════════════════════
-# IMGFLOW — Distroless Production Dockerfile
-# Target: HuggingFace Spaces (CPU, x86_64, port 7860)
-#
-# Stage layout:
-#   builder  — python:3.11-slim-bookworm
-#              Installs all Python deps, pre-downloads AI models.
-#              Has gcc + curl + libGL for build-time imports (rembg, iopaint).
-#
-#   syslibs  — debian:12-slim
-#              Installs ONLY the system .so files that distroless is missing:
-#                libglib2.0-0  → libglib-2.0.so.0 + libgthread-2.0.so.0
-#                libgomp1      → libgomp.so.1  (torch CPU kernels)
-#                libpcre2-8-0  → libpcre2-8.so.0 (glib transitive dep)
-#              Nothing else — no Python, no pip, no shell utilities.
-#
-#   runtime  — gcr.io/distroless/python3-debian12:nonroot
-#              ~20 MB base. Contains Python 3.11, glibc, libssl, libz,
-#              libstdc++, libgcc_s. No shell, no package manager, no curl.
-#              Inherits /opt/venv + /opt/models from builder.
-#              Inherits missing .so files from syslibs.
-#
-# Why distroless over slim-bookworm:
-#   • Eliminates shell, apt, coreutils, etc. → smaller CVE surface
-#   • Forces immutable, minimal runtime — no exec into container possible
-#   • ~60–80 MB smaller final image
-#
-# Distroless constraints handled:
-#   • No shell → CMD must use exec-form JSON array (already the case)
-#   • No curl → HEALTHCHECK removed; use Docker/HF Spaces liveness probes
-#   • No /tmp by default → tmpfile use in rawpy gets /tmp from distroless base
-#   • UID 65532 (nonroot) → all paths chowned in builder before COPY
-# ═══════════════════════════════════════════════════════════════════════════
-
-
 # ───────────────────────────────────────────────────────────────────────────
 # Stage 1 — builder
 # ───────────────────────────────────────────────────────────────────────────
@@ -108,9 +71,7 @@ RUN find $VIRTUAL_ENV \( \
 
 # ── Fix ownership for distroless nonroot UID 65532 ───────────────────────
 # Must be done here because distroless has no chown/shell at runtime.
-# Ensure venv python binary is addressable as python3.11 (distroless ENTRYPOINT needs exact name)
-RUN ln -sf /opt/venv/bin/python /opt/venv/bin/python3.11 2>/dev/null || true && \
-    chown -R 65532:65532 /opt/venv /opt/models /app
+RUN chown -R 65532:65532 /opt/venv /opt/models /app
 
 
 # ───────────────────────────────────────────────────────────────────────────
@@ -143,18 +104,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONFAULTHANDLER=1 \
     VIRTUAL_ENV=/opt/venv \
-    # distroless python3 lives at /usr/bin/python3; point to venv
-    PATH="/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
-    PYTHONPATH=/app \
+    PYTHONPATH=/app:/opt/venv/lib/python3.11/site-packages \
     TORCH_HOME=/opt/models/torch \
     U2NET_HOME=/opt/models/u2net \
-    # Thread pinning — prevents CPU oversubscription under single uvicorn worker
     OMP_NUM_THREADS=2 \
     OPENBLAS_NUM_THREADS=2 \
     MKL_NUM_THREADS=2 \
     NUMEXPR_NUM_THREADS=2 \
     VECLIB_MAXIMUM_THREADS=2 \
-    # Limit glibc malloc arena growth (~50–150 MB RSS saved on long AI workloads)
     MALLOC_ARENA_MAX=2 \
     OPENCV_OPENCL_RUNTIME=disabled \
     ORT_DISABLE_TELEMETRY=1
@@ -181,7 +138,6 @@ COPY --from=builder --chown=65532:65532 /app/processing.py ./
 # Cache-bust: change this value to force HuggingFace to rebuild from this layer.
 # HF caches aggressively by layer hash — incrementing CACHE_BUST invalidates
 # all layers from this point down without touching earlier cached layers.
-ARG CACHE_BUST=2
 COPY --chown=65532:65532 index.html style.css script.js ./static/
 
 # ── Security: run as nonroot (UID 65532 = distroless "nonroot" user) ─────
@@ -193,9 +149,12 @@ USER nonroot
 
 EXPOSE 7860
 
-# Must use exec-form JSON array — distroless has no /bin/sh to parse strings.
-# uvicorn is at /opt/venv/bin/uvicorn (on PATH via VIRTUAL_ENV).
-ENTRYPOINT ["/opt/venv/bin/python3.11"]
+# distroless python3-debian12 ships Python at /usr/bin/python3.11.
+# Venv symlinks break in distroless (they point back to /usr/bin/python3).
+# Instead: use the distroless Python directly and expose venv site-packages
+# via PYTHONPATH=/opt/venv/lib/python3.11/site-packages (set in ENV above).
+# Venv binaries like uvicorn are NOT used — we invoke uvicorn as a module.
+ENTRYPOINT ["/usr/bin/python3.11"]
 CMD ["-m", "uvicorn", "main:app", \
      "--host", "0.0.0.0", \
      "--port", "7860", \
