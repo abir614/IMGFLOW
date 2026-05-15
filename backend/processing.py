@@ -464,33 +464,51 @@ def _get_lama_model():
         return None
 
 
+def _lama_inpaint_once(lama, canvas: np.ndarray, mask: np.ndarray, inpaint_cfg) -> np.ndarray:
+    """
+    Run one LaMa pass at a safe resolution.
+    canvas: H×W×3 RGB uint8.  mask: H×W uint8 (255=fill, 0=known).
+    Returns RGB uint8.
+    """
+    H, W = canvas.shape[:2]
+    MAX_DIM = 1024
+    scale = min(MAX_DIM / W, MAX_DIM / H, 1.0)
+    lW = max(8, round(W * scale))
+    lH = max(8, round(H * scale))
+
+    if scale < 1.0:
+        c = cv2.resize(canvas, (lW, lH), interpolation=cv2.INTER_AREA)
+        m = cv2.resize(mask,   (lW, lH), interpolation=cv2.INTER_NEAREST)
+    else:
+        c, m = canvas.copy(), mask.copy()
+
+    m = (m > 127).astype(np.uint8) * 255
+    result_bgr = lama._pad_forward(c, m, inpaint_cfg)
+    result_bgr = np.clip(result_bgr, 0, 255).astype(np.uint8)
+    result_rgb = cv2.cvtColor(result_bgr, cv2.COLOR_BGR2RGB)
+
+    if scale < 1.0:
+        result_rgb = cv2.resize(result_rgb, (W, H), interpolation=cv2.INTER_LANCZOS4)
+
+    return result_rgb
+
+
 def fill_lama(src: Image.Image, ox: int, oy: int, W: int, H: int, blend_radius: int) -> Image.Image:
     """
-    Content-aware outpainting using a 3-tier fallback chain:
+    Content-aware outpainting using a 3-tier fallback chain.
 
-      Tier 1 — LaMa (iopaint):  Deep-learning inpainting model.  Understands
-               scene context and synthesises coherent textures and structures
-               in the extension zone.  Requires torch + iopaint installed.
-
-      Tier 2 — OpenCV TELEA:    Fast classical inpainting (Navier-Stokes
-               variant). No deep learning, but handles smooth gradients and
-               simple backgrounds well without any model download.
-
-      Tier 3 — Edge extend:     Pure numpy edge-pixel propagation.  Always
-               available, zero dependencies beyond NumPy.
-
-    Pipeline (all tiers share steps 1, 4, 5):
-      1. Build an edge-extended canvas for context bootstrapping
-      2. Run chosen inpainter on the full-resolution canvas
-      3. Upscale result if inpainting ran at reduced resolution (LaMa)
-      4. Re-stamp original source pixels exactly
-      5. Smooth the seam with a bidirectional Smoothstep blend
+    Tier 1 — LaMa tiled: fills extension zones in strips of ~300px per pass,
+             feeding each result back as context for the next. This avoids
+             asking LaMa to synthesise >30% of the image in one shot, which
+             causes blur and incoherence.
+    Tier 2 — OpenCV TELEA classical inpainting.
+    Tier 3 — Edge-extend fallback (always available).
     """
     sw, sh = src.width, src.height
     has_alpha = src.mode == "RGBA"
     src_rgb = np.array(src.convert("RGB"), dtype=np.uint8)
 
-    # ── Clamped source placement bounds (shared by all tiers) ───────────────
+    # ── Clamped source placement bounds ─────────────────────────────────────
     dst_x1 = max(ox, 0);      dst_x2 = min(ox + sw, W)
     dst_y1 = max(oy, 0);      dst_y2 = min(oy + sh, H)
     src_x1 = dst_x1 - ox;    src_x2 = dst_x2 - ox
@@ -500,19 +518,14 @@ def fill_lama(src: Image.Image, ox: int, oy: int, W: int, H: int, blend_radius: 
     if not needs_fill:
         return src
 
-    # ── 1. Edge-extended canvas ──────────────────────────────────────────────
+    # ── 1. Edge-extended canvas as starting point ────────────────────────────
     canvas = _build_edge_canvas(src_rgb, ox, oy, W, H, sw, sh)
-
-    # ── Inpainting mask: 255 = fill zone, 0 = known source ──────────────────
-    mask_full = np.ones((H, W), dtype=np.uint8) * 255
-    if dst_x2 > dst_x1 and dst_y2 > dst_y1:
-        mask_full[dst_y1:dst_y2, dst_x1:dst_x2] = 0
 
     filled_up: np.ndarray | None = None
 
-    # ── Tier 1: LaMa (iopaint) ───────────────────────────────────────────────
+    # ── Tier 1: LaMa tiled multi-pass ────────────────────────────────────────
     lama = _get_lama_model()
-    if lama is not None and filled_up is None:
+    if lama is not None:
         try:
             from iopaint.schema import InpaintRequest
             try:
@@ -521,39 +534,64 @@ def fill_lama(src: Image.Image, ox: int, oy: int, W: int, H: int, blend_radius: 
             except (ImportError, AttributeError):
                 hd_strategy = "Original"
 
-            # Only scale down if canvas is significantly larger than 1536px.
-            # Scaling a 1200px canvas to 1024 then back up is the main source
-            # of output blur — skip the round-trip when it buys little.
-            MAX_DIM = 1536
-            scale   = min(MAX_DIM / W, MAX_DIM / H, 1.0)
-            lW      = max(8, round(W * scale))
-            lH      = max(8, round(H * scale))
-
-            small_canvas = cv2.resize(canvas, (lW, lH), interpolation=cv2.INTER_AREA)
-            small_mask   = cv2.resize(mask_full, (lW, lH), interpolation=cv2.INTER_NEAREST)
-
-            # Ensure mask is strictly binary for LaMa
-            # mask must be 2-D [H, W] — forward() and _pad_forward() both expect this
-            small_mask = (small_mask > 127).astype(np.uint8) * 255
-
             inpaint_cfg = InpaintRequest(hd_strategy=hd_strategy)
 
-            # _pad_forward: image [H,W,3] RGB uint8, mask [H,W] uint8
-            # forward() internally does cvtColor(RGB2BGR) before model,
-            # then cvtColor(RGB2BGR) on output — so _pad_forward returns BGR.
-            # Some builds return float64 instead of uint8; cast before cvtColor.
-            result_bgr = lama._pad_forward(small_canvas, small_mask, inpaint_cfg)
-            result_bgr = np.clip(result_bgr, 0, 255).astype(np.uint8)
-            result_rgb_small = cv2.cvtColor(result_bgr, cv2.COLOR_BGR2RGB)
+            # TILE_STEP: how many pixels to reveal per pass.
+            # Smaller = more passes but better quality on large extensions.
+            TILE_STEP = 300
+            current = canvas.copy()
 
-            if scale < 1.0:
-                filled_up = cv2.resize(
-                    result_rgb_small, (W, H), interpolation=cv2.INTER_LANCZOS4
-                ).astype(np.float32)
-            else:
-                filled_up = result_rgb_small.astype(np.float32)
+            # Track which pixels are "known" (not needing fill).
+            # Starts as the source placement; grows each pass.
+            known = np.zeros((H, W), dtype=bool)
+            if dst_x2 > dst_x1 and dst_y2 > dst_y1:
+                known[dst_y1:dst_y2, dst_x1:dst_x2] = True
 
-            print("[INFO] AI fill: LaMa inpainting used")
+            # Build ordered list of strips to fill: left→right then right→left
+            # on x-axis, top→bottom then bottom→top on y-axis.
+            # Each pass expands the known region by TILE_STEP px.
+            passes = 0
+            max_passes = 20
+
+            while passes < max_passes:
+                # Erode known region outward by TILE_STEP to find next strip
+                from scipy.ndimage import binary_dilation
+                struct = np.ones((TILE_STEP * 2 + 1, TILE_STEP * 2 + 1), dtype=bool)
+                expanded = binary_dilation(known, structure=struct)
+                expanded[:, :] &= True   # clamp to canvas
+
+                strip_mask = expanded & ~known   # new zone to fill this pass
+                # Also include any still-unknown pixels outside expanded
+                remaining = ~expanded
+                full_fill_mask = (strip_mask | remaining)
+
+                if not full_fill_mask.any():
+                    break   # all pixels known
+
+                mask_pass = full_fill_mask.astype(np.uint8) * 255
+
+                result = _lama_inpaint_once(lama, current, mask_pass, inpaint_cfg)
+
+                # Commit only the strip_mask pixels from this result;
+                # keep previously known pixels exact.
+                update_zone = strip_mask
+                current[update_zone] = result[update_zone]
+                known |= strip_mask
+
+                passes += 1
+                filled_pixels = strip_mask.sum()
+                print(f"[INFO] LaMa pass {passes}: filled {filled_pixels} px, known={known.sum()}/{W*H}")
+
+                if known.all():
+                    break
+
+            # Re-stamp exact source pixels
+            if dst_x2 > dst_x1 and dst_y2 > dst_y1:
+                current[dst_y1:dst_y2, dst_x1:dst_x2] = src_rgb[src_y1:src_y2, src_x1:src_x2]
+
+            filled_up = current.astype(np.float32)
+            print(f"[INFO] AI fill: LaMa tiled inpainting used ({passes} passes)")
+
         except Exception as e:
             import traceback
             print(f"[WARN] LaMa inpainting failed:\n{traceback.format_exc()}")
@@ -562,17 +600,19 @@ def fill_lama(src: Image.Image, ox: int, oy: int, W: int, H: int, blend_radius: 
     # ── Tier 2: OpenCV TELEA inpainting ─────────────────────────────────────
     if filled_up is None:
         try:
-            # Run at capped resolution for speed; TELEA degrades above ~600 px
+            mask_full = np.ones((H, W), dtype=np.uint8) * 255
+            if dst_x2 > dst_x1 and dst_y2 > dst_y1:
+                mask_full[dst_y1:dst_y2, dst_x1:dst_x2] = 0
+
             MAX_DIM_CV = 512
             scale_cv   = min(MAX_DIM_CV / W, MAX_DIM_CV / H, 1.0)
             cvW        = max(8, round(W * scale_cv))
             cvH        = max(8, round(H * scale_cv))
 
-            small_cv   = cv2.resize(canvas,    (cvW, cvH), interpolation=cv2.INTER_AREA)
-            mask_cv    = cv2.resize(mask_full,  (cvW, cvH), interpolation=cv2.INTER_NEAREST)
+            small_cv   = cv2.resize(canvas,     (cvW, cvH), interpolation=cv2.INTER_AREA)
+            mask_cv    = cv2.resize(mask_full,   (cvW, cvH), interpolation=cv2.INTER_NEAREST)
             mask_cv    = (mask_cv > 127).astype(np.uint8) * 255
 
-            # TELEA expects BGR
             result_cv  = cv2.inpaint(
                 cv2.cvtColor(small_cv, cv2.COLOR_RGB2BGR),
                 mask_cv, inpaintRadius=3, flags=cv2.INPAINT_TELEA
