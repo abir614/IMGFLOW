@@ -8,4 +8,6 @@ scipy
 packaging
 rembg[gpu]
 onnxruntime
-iopaint
+huggingface-hub==0.25.2
+diffusers==0.27.2
+iopaint==1.6.0
