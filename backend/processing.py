@@ -105,7 +105,7 @@ def run_flow2(img: Image.Image, cfg: dict) -> dict:
 # ═══════════════════════════════════════
 
 def run_flow3(img: Image.Image, cfg: dict) -> dict:
-    """Smart Resize: detect → crop/extend → upscale → WebP"""
+    """Smart Resize: detect → crop/extend → target dimensions → WebP"""
     t0 = time.time()
     orig_size = _img_size(img)
     tw, th = cfg["resize_w"], cfg["resize_h"]
@@ -117,11 +117,6 @@ def run_flow3(img: Image.Image, cfg: dict) -> dict:
         img, decision = smart_resize(img, tw, th, cfg)
 
     after_resize = _img_size(img)
-
-    # Upscale (now at target resolution so factor is 1 unless user wants more quality)
-    factor = cfg.get("factor", 1.0)
-    if factor > 1.0:
-        img = upscale(img, factor, cfg["method"])
 
     # Encode
     blob = encode_webp(img, cfg["quality"], cfg["max_kb"])
