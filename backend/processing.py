@@ -540,8 +540,10 @@ def fill_lama(src: Image.Image, ox: int, oy: int, W: int, H: int, blend_radius: 
 
             # _pad_forward: image [H,W,3] RGB uint8, mask [H,W] uint8
             # forward() internally does cvtColor(RGB2BGR) before model,
-            # then cvtColor(RGB2BGR) on output — so _pad_forward returns BGR
+            # then cvtColor(RGB2BGR) on output — so _pad_forward returns BGR.
+            # Some builds return float64 instead of uint8; cast before cvtColor.
             result_bgr = lama._pad_forward(small_canvas, small_mask, inpaint_cfg)
+            result_bgr = np.clip(result_bgr, 0, 255).astype(np.uint8)
             result_rgb_small = cv2.cvtColor(result_bgr, cv2.COLOR_BGR2RGB)
 
             if scale < 1.0:
