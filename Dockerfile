@@ -101,7 +101,7 @@ COPY backend/processing.py .
 COPY index.html ./static/index.html
 COPY style.css ./static/style.css
 COPY script.js ./static/script.js
-COPY favicon.ico ./static/favicon.ico
+#COPY favicon.ico ./static/favicon.ico
 
 RUN mkdir -p /app/static && \
     chown -R appuser:appuser /app /opt/models
