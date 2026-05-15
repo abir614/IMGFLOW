@@ -319,6 +319,8 @@ def proportional_resize(img: Image.Image, tw: int, th: int, cfg: dict):
         out.paste(scaled, (ox, oy))
     elif fill == "extend":
         out = fill_seamless_pil(scaled, ox, oy, tw, th, blend)
+    elif fill == "ai-extend":
+        out = fill_lama(scaled, ox, oy, tw, th, blend)
     else:
         out = fill_seamless_pil(scaled, ox, oy, tw, th, blend)
 
@@ -437,92 +439,175 @@ def _blend_seam(arr: np.ndarray, ox: int, oy: int, sw: int, sh: int, W: int, H: 
 
 
 # ═══════════════════════════════════════
-# AI FILL — Content-Aware ShiftMap Synthesis
+# AI FILL — LaMa Inpainting via iopaint
 # ═══════════════════════════════════════
+
+# Module-level singleton so the model is loaded once per process
+_lama_model = None
+
+def _get_lama_model():
+    """Lazy-load the LaMa model singleton. Returns None if unavailable."""
+    global _lama_model
+    if _lama_model is not None:
+        return _lama_model
+    try:
+        import torch
+        from iopaint.model.lama import LaMa
+        from iopaint.schema import InpaintRequest
+
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        _lama_model = LaMa(device)
+        print(f"[INFO] LaMa model loaded on {device}")
+        return _lama_model
+    except Exception as e:
+        print(f"[WARN] LaMa unavailable ({e})")
+        return None
+
 
 def fill_lama(src: Image.Image, ox: int, oy: int, W: int, H: int, blend_radius: int) -> Image.Image:
     """
-    Content-aware outpainting via OpenCV ShiftMap patch synthesis.
+    Content-aware outpainting using a 3-tier fallback chain:
 
-    Pipeline:
-      1. Build an edge-extended canvas (fast neighbourhood context for ShiftMap)
-      2. Run cv2.xphoto ShiftMap inpainting at ≤320 px to find best-matching
-         texture patches from the *known* source region
-      3. Upscale the synthesised fill to full output resolution with Lanczos
-      4. Re-stamp the original source pixels exactly (ShiftMap may alter them)
-      5. Smooth the seam with a bidirectional blend so the boundary is invisible
+      Tier 1 — LaMa (iopaint):  Deep-learning inpainting model.  Understands
+               scene context and synthesises coherent textures and structures
+               in the extension zone.  Requires torch + iopaint installed.
 
-    ShiftMap (He et al. 2012) is a patch-based algorithm — equivalent to
-    Photoshop's Content-Aware Fill — it picks coherent patches from the image
-    rather than blurring or repeating edge pixels.  Running it at a capped
-    resolution (320 px) keeps latency under ~4 s while preserving the
-    structural intent; the Lanczos upsample then restores detail resolution.
+      Tier 2 — OpenCV TELEA:    Fast classical inpainting (Navier-Stokes
+               variant). No deep learning, but handles smooth gradients and
+               simple backgrounds well without any model download.
 
-    Falls back to fill_seamless_pil if opencv-contrib is unavailable.
+      Tier 3 — Edge extend:     Pure numpy edge-pixel propagation.  Always
+               available, zero dependencies beyond NumPy.
+
+    Pipeline (all tiers share steps 1, 4, 5):
+      1. Build an edge-extended canvas for context bootstrapping
+      2. Run chosen inpainter on the full-resolution canvas
+      3. Upscale result if inpainting ran at reduced resolution (LaMa)
+      4. Re-stamp original source pixels exactly
+      5. Smooth the seam with a bidirectional Smoothstep blend
     """
     sw, sh = src.width, src.height
     has_alpha = src.mode == "RGBA"
     src_rgb = np.array(src.convert("RGB"), dtype=np.uint8)
 
-    # ── 1. Edge-extended canvas ──────────────────────────────────────────────
-    canvas = _build_edge_canvas(src_rgb, ox, oy, W, H, sw, sh)
+    # ── Clamped source placement bounds (shared by all tiers) ───────────────
+    dst_x1 = max(ox, 0);      dst_x2 = min(ox + sw, W)
+    dst_y1 = max(oy, 0);      dst_y2 = min(oy + sh, H)
+    src_x1 = dst_x1 - ox;    src_x2 = dst_x2 - ox
+    src_y1 = dst_y1 - oy;    src_y2 = dst_y2 - oy
 
-    needs_fill = ox > 0 or oy > 0 or (ox + sw) < W or (oy + sh) < H
+    needs_fill = dst_x1 > 0 or dst_y1 > 0 or dst_x2 < W or dst_y2 < H
     if not needs_fill:
         return src
 
-    # ── 2. ShiftMap at capped resolution ────────────────────────────────────
-    try:
-        MAX_DIM = 320
-        scale = min(MAX_DIM / W, MAX_DIM / H, 1.0)
-        lW   = max(1, round(W  * scale))
-        lH   = max(1, round(H  * scale))
-        lsw  = max(1, round(sw * scale))
-        lsh  = max(1, round(sh * scale))
-        lox  = round(ox * scale)
-        loy  = round(oy * scale)
+    # ── 1. Edge-extended canvas ──────────────────────────────────────────────
+    canvas = _build_edge_canvas(src_rgb, ox, oy, W, H, sw, sh)
 
-        small = cv2.resize(canvas, (lW, lH), interpolation=cv2.INTER_AREA)
+    # ── Inpainting mask: 255 = fill zone, 0 = known source ──────────────────
+    mask_full = np.ones((H, W), dtype=np.uint8) * 255
+    if dst_x2 > dst_x1 and dst_y2 > dst_y1:
+        mask_full[dst_y1:dst_y2, dst_x1:dst_x2] = 0
 
-        # Mask: 0 = known region, 255 = to inpaint
-        mask_small = np.ones((lH, lW), dtype=np.uint8) * 255
-        mask_small[loy : loy + lsh, lox : lox + lsw] = 0
+    filled_up: np.ndarray | None = None
 
-        # ShiftMap works best in Lab (perceptually uniform colour space)
-        lab     = cv2.cvtColor(small, cv2.COLOR_RGB2Lab)
-        dst_lab = np.zeros_like(lab)
-        cv2.xphoto.inpaint(lab, mask_small, dst_lab, cv2.xphoto.INPAINT_SHIFTMAP)
-        filled_small = cv2.cvtColor(dst_lab, cv2.COLOR_Lab2RGB)
+    # ── Tier 1: LaMa (iopaint) ───────────────────────────────────────────────
+    lama = _get_lama_model()
+    if lama is not None and filled_up is None:
+        try:
+            from iopaint.schema import InpaintRequest, HDStrategy
 
-    except Exception as e:
-        print(f"[WARN] ShiftMap failed ({e}), falling back to edge fill")
+            # LaMa works best at ≤1024 px; scale down, inpaint, then upscale
+            MAX_DIM = 1024
+            scale   = min(MAX_DIM / W, MAX_DIM / H, 1.0)
+            lW      = max(8, round(W * scale))
+            lH      = max(8, round(H * scale))
+
+            small_canvas = cv2.resize(canvas, (lW, lH), interpolation=cv2.INTER_AREA)
+            small_mask   = cv2.resize(mask_full, (lW, lH), interpolation=cv2.INTER_NEAREST)
+
+            # Ensure mask is strictly binary for LaMa
+            small_mask = (small_mask > 127).astype(np.uint8) * 255
+
+            cfg = InpaintRequest(hd_strategy=HDStrategy.ORIGINAL)
+            # LaMa.forward expects mask shape [H, W, 1] for _pad_forward
+            result_bgr = lama._pad_forward(small_canvas, small_mask[:, :, np.newaxis], cfg)
+
+            # result_bgr is BGR uint8
+            result_rgb_small = cv2.cvtColor(result_bgr, cv2.COLOR_BGR2RGB)
+
+            if scale < 1.0:
+                filled_up = cv2.resize(
+                    result_rgb_small, (W, H), interpolation=cv2.INTER_LANCZOS4
+                ).astype(np.float32)
+            else:
+                filled_up = result_rgb_small.astype(np.float32)
+
+            print("[INFO] AI fill: LaMa inpainting used")
+        except Exception as e:
+            print(f"[WARN] LaMa inpainting failed ({e}), trying OpenCV TELEA")
+            filled_up = None
+
+    # ── Tier 2: OpenCV TELEA inpainting ─────────────────────────────────────
+    if filled_up is None:
+        try:
+            # Run at capped resolution for speed; TELEA degrades above ~600 px
+            MAX_DIM_CV = 512
+            scale_cv   = min(MAX_DIM_CV / W, MAX_DIM_CV / H, 1.0)
+            cvW        = max(8, round(W * scale_cv))
+            cvH        = max(8, round(H * scale_cv))
+
+            small_cv   = cv2.resize(canvas,    (cvW, cvH), interpolation=cv2.INTER_AREA)
+            mask_cv    = cv2.resize(mask_full,  (cvW, cvH), interpolation=cv2.INTER_NEAREST)
+            mask_cv    = (mask_cv > 127).astype(np.uint8) * 255
+
+            # TELEA expects BGR
+            result_cv  = cv2.inpaint(
+                cv2.cvtColor(small_cv, cv2.COLOR_RGB2BGR),
+                mask_cv, inpaintRadius=3, flags=cv2.INPAINT_TELEA
+            )
+            result_cv  = cv2.cvtColor(result_cv, cv2.COLOR_BGR2RGB)
+
+            if scale_cv < 1.0:
+                filled_up = cv2.resize(
+                    result_cv, (W, H), interpolation=cv2.INTER_LANCZOS4
+                ).astype(np.float32)
+            else:
+                filled_up = result_cv.astype(np.float32)
+
+            print("[INFO] AI fill: OpenCV TELEA inpainting used (LaMa unavailable)")
+        except Exception as e:
+            print(f"[WARN] OpenCV TELEA failed ({e}), falling back to edge fill")
+            filled_up = None
+
+    # ── Tier 3: Edge-extend fallback ────────────────────────────────────────
+    if filled_up is None:
+        print("[INFO] AI fill: edge-extend fallback used")
         return fill_seamless_pil(src, ox, oy, W, H, blend_radius)
 
-    # ── 3. Upscale synthesised fill to full output resolution ────────────────
-    filled_up = cv2.resize(
-        filled_small, (W, H), interpolation=cv2.INTER_LANCZOS4
-    ).astype(np.float32)
-
     # ── 4. Re-stamp exact source pixels ─────────────────────────────────────
-    filled_up[oy : oy + sh, ox : ox + sw] = src_rgb.astype(np.float32)
+    if dst_x2 > dst_x1 and dst_y2 > dst_y1:
+        filled_up[dst_y1:dst_y2, dst_x1:dst_x2] = \
+            src_rgb[src_y1:src_y2, src_x1:src_x2].astype(np.float32)
 
     # ── 5. Bidirectional seam blend ──────────────────────────────────────────
-    blend_r = max(8, min(blend_radius, 80))
-    ey = min(oy + sh, H)
-    ex = min(ox + sw, W)
+    blend_r  = max(8, min(blend_radius, 80))
+    sy_start = dst_y1
+    sx_start = dst_x1
+    ey       = dst_y2
+    ex       = dst_x2
 
-    if ey > oy and ex > ox:
-        ys_i, xs_i = np.mgrid[oy:ey, ox:ex]
-        dx_v = np.minimum(xs_i - ox, (ex - 1) - xs_i)
-        dy_v = np.minimum(ys_i - oy, (ey - 1) - ys_i)
+    if ey > sy_start and ex > sx_start:
+        ys_i, xs_i = np.mgrid[sy_start:ey, sx_start:ex]
+        dx_v = np.minimum(xs_i - sx_start, (ex - 1) - xs_i)
+        dy_v = np.minimum(ys_i - sy_start, (ey - 1) - ys_i)
         d_v  = np.minimum(dx_v, dy_v).astype(np.float32)
         t_v  = np.clip(d_v / blend_r, 0.0, 1.0)
         t_v  = t_v * t_v * (3.0 - 2.0 * t_v)   # smoothstep
 
         tm = t_v[:, :, np.newaxis]
-        filled_up[oy:ey, ox:ex] = (
-            src_rgb.astype(np.float32) * tm
-            + filled_up[oy:ey, ox:ex]     * (1.0 - tm)
+        src_patch = src_rgb[src_y1:src_y2, src_x1:src_x2].astype(np.float32)
+        filled_up[sy_start:ey, sx_start:ex] = (
+            src_patch * tm + filled_up[sy_start:ey, sx_start:ex] * (1.0 - tm)
         )
 
     result = np.clip(filled_up, 0, 255).astype(np.uint8)
@@ -536,6 +621,8 @@ def _build_edge_canvas(
     """
     Place src_rgb at (ox, oy) on a W×H canvas and flood every extension zone
     by clamping to the nearest source edge pixel.  Vectorised with NumPy.
+
+    Handles negative ox/oy (source larger than canvas on that axis).
     """
     canvas = np.empty((H, W, 3), dtype=np.uint8)
 
@@ -547,8 +634,15 @@ def _build_edge_canvas(
     # Broadcast fill: each row y gets src[sy[y], sx[:]]
     canvas[:, :] = src_rgb[sy[:, None], sx[None, :]]
 
-    # Overwrite the known region with exact source pixels
-    canvas[oy : oy + sh, ox : ox + sw] = src_rgb
+    # Overwrite the known (visible) region with exact source pixels.
+    # Must clamp to canvas bounds when ox/oy are negative.
+    dst_x1 = max(ox, 0);       dst_x2 = min(ox + sw, W)
+    dst_y1 = max(oy, 0);       dst_y2 = min(oy + sh, H)
+    src_x1 = dst_x1 - ox;     src_x2 = dst_x2 - ox
+    src_y1 = dst_y1 - oy;     src_y2 = dst_y2 - oy
+
+    if dst_x2 > dst_x1 and dst_y2 > dst_y1:
+        canvas[dst_y1:dst_y2, dst_x1:dst_x2] = src_rgb[src_y1:src_y2, src_x1:src_x2]
 
     return canvas
 
