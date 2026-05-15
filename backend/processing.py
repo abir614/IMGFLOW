@@ -521,8 +521,10 @@ def fill_lama(src: Image.Image, ox: int, oy: int, W: int, H: int, blend_radius: 
             except (ImportError, AttributeError):
                 hd_strategy = "Original"
 
-            # LaMa works best at ≤1024 px; scale down, inpaint, then upscale
-            MAX_DIM = 1024
+            # Only scale down if canvas is significantly larger than 1536px.
+            # Scaling a 1200px canvas to 1024 then back up is the main source
+            # of output blur — skip the round-trip when it buys little.
+            MAX_DIM = 1536
             scale   = min(MAX_DIM / W, MAX_DIM / H, 1.0)
             lW      = max(8, round(W * scale))
             lH      = max(8, round(H * scale))
@@ -596,8 +598,10 @@ def fill_lama(src: Image.Image, ox: int, oy: int, W: int, H: int, blend_radius: 
         filled_up[dst_y1:dst_y2, dst_x1:dst_x2] = \
             src_rgb[src_y1:src_y2, src_x1:src_x2].astype(np.float32)
 
-    # ── 5. Bidirectional seam blend ──────────────────────────────────────────
-    blend_r  = max(8, min(blend_radius, 80))
+    # ── 5. Seam blend: fade from LaMa fill → exact source pixels ────────────
+    # d_v = distance from the nearest edge of the placed region (0 at seam, grows inward)
+    # t=0 at seam (keep LaMa fill), t=1 at blend_r pixels inside (full source)
+    blend_r  = max(8, min(blend_radius, 60))
     sy_start = dst_y1
     sx_start = dst_x1
     ey       = dst_y2
@@ -608,14 +612,15 @@ def fill_lama(src: Image.Image, ox: int, oy: int, W: int, H: int, blend_radius: 
         dx_v = np.minimum(xs_i - sx_start, (ex - 1) - xs_i)
         dy_v = np.minimum(ys_i - sy_start, (ey - 1) - ys_i)
         d_v  = np.minimum(dx_v, dy_v).astype(np.float32)
+        # t=0 → seam edge (use LaMa), t=1 → interior (use source)
         t_v  = np.clip(d_v / blend_r, 0.0, 1.0)
         t_v  = t_v * t_v * (3.0 - 2.0 * t_v)   # smoothstep
 
         tm = t_v[:, :, np.newaxis]
-        src_patch = src_rgb[src_y1:src_y2, src_x1:src_x2].astype(np.float32)
-        filled_up[sy_start:ey, sx_start:ex] = (
-            src_patch * tm + filled_up[sy_start:ey, sx_start:ex] * (1.0 - tm)
-        )
+        src_patch  = src_rgb[src_y1:src_y2, src_x1:src_x2].astype(np.float32)
+        fill_patch = filled_up[sy_start:ey, sx_start:ex].copy()
+        # At seam (t=0): fill_patch (LaMa). At interior (t=1): src_patch.
+        filled_up[sy_start:ey, sx_start:ex] = src_patch * tm + fill_patch * (1.0 - tm)
 
     result = np.clip(filled_up, 0, 255).astype(np.uint8)
     out = Image.fromarray(result)
