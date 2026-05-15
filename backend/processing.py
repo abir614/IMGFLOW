@@ -555,7 +555,8 @@ def fill_lama(src: Image.Image, ox: int, oy: int, W: int, H: int, blend_radius: 
 
             print("[INFO] AI fill: LaMa inpainting used")
         except Exception as e:
-            print(f"[WARN] LaMa inpainting failed ({e}), trying OpenCV TELEA")
+            import traceback
+            print(f"[WARN] LaMa inpainting failed:\n{traceback.format_exc()}")
             filled_up = None
 
     # ── Tier 2: OpenCV TELEA inpainting ─────────────────────────────────────
