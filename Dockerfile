@@ -1,5 +1,3 @@
-change the docker image to it's ultimate smallest docker version, which will be optimized, performance boosted
-
 FROM python:3.11-slim-bookworm AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive \
