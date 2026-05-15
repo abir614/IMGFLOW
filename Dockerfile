@@ -1,7 +1,7 @@
 # ============================================================
 # Stage 1 — Builder
 # ============================================================
-FROM python:3.11-slim AS builder
+FROM python:3.11-slim-bookworm AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -134,7 +134,7 @@ COPY backend/processing.py .
 COPY index.html ./static/index.html
 COPY style.css ./static/style.css
 COPY script.js ./static/script.js
-COPY favicon.ico ./static/favicon.ico
+RUN wget -O ./static/favicon.ico "https://raw.githubusercontent.com/abir614/IMGFLOW/refs/heads/main/favicon.ico"
 
 # ------------------------------------------------------------
 # Expose
