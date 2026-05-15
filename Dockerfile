@@ -1,7 +1,7 @@
 # ============================================================
 # Stage 1 — Builder
 # ============================================================
-FROM python:3.11-slim-bookworm AS builder
+FROM python:3.11-slim AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
