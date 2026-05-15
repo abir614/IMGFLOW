@@ -1,4 +1,4 @@
-FROM python:3.11-slim-bookworm AS builder
+FROM python:3.14.5-slim-bookworm AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -55,7 +55,7 @@ RUN find $VIRTUAL_ENV -type d -name '__pycache__' -exec rm -rf {} + && \
     find $VIRTUAL_ENV -type f -name '*.pyc' -delete && \
     find $VIRTUAL_ENV -type f -name '*.pyo' -delete
 
-FROM python:3.11-slim-bookworm
+FROM python:3.14.5-slim-bookworm
 
 LABEL maintainer="Ultimate-AI-Container" \
       description="Ultra-optimized FastAPI + rembg + ONNX Runtime container"
@@ -117,5 +117,4 @@ CMD ["uvicorn", "main:app", \
      "--port", "7860", \
      "--workers", "1", \
      "--loop", "uvloop", \
-     "--http", "httptools", \
-     "--no-access-log"]
+     "--http", "httptools"]
