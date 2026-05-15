@@ -193,8 +193,10 @@ async def process_image(
         else:
             raise HTTPException(400, f"Unknown flow: {flow}")
     except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
         logger.exception(f"Processing failed: {e}")
-        raise HTTPException(500, f"Processing error: {e}")
+        raise HTTPException(500, f"Processing error: {e}\n\nTraceback:\n{tb}")
 
     elapsed = time.time() - t0
     logger.info(f"[flow={flow}] Done {orig_name} in {elapsed:.1f}s → {len(result['blob'])//1024} KB")
